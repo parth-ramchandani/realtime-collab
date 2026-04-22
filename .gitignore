@@ -4,3 +4,4 @@ dist
 .env.local
 frontend/dist
 *.log
+*.tsbuildinfo
