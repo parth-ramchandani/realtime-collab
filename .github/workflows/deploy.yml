@@ -107,6 +107,6 @@ jobs:
 
                       wait_for_health
 
-                      rm -rf "$FRONTEND_RELEASE" "$FRONTEND_BACKUP"
+            sudo rm -rf "$FRONTEND_RELEASE" "$FRONTEND_BACKUP"
                       trap - ERR
                       echo "Deployment successful."
