@@ -1,0 +1,99 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Deploy with health-check and rollback
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          APP_DIR: ${{ secrets.EC2_APP_DIR }}
+          HEALTHCHECK_URL: http://127.0.0.1:4000/health
+          FRONTEND_ROOT: /var/www/collab-app
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_PORT || '22' }}
+          envs: APP_DIR,HEALTHCHECK_URL,FRONTEND_ROOT
+          script_stop: true
+          script: |
+            set -Eeuo pipefail
+
+            cd "$APP_DIR"
+            PREV_COMMIT="$(git rev-parse HEAD)"
+            RELEASE_ID="$(date +%Y%m%d%H%M%S)"
+            FRONTEND_RELEASE="/tmp/collab-frontend-${RELEASE_ID}"
+            FRONTEND_BACKUP="/tmp/collab-frontend-backup-${RELEASE_ID}"
+            ROLLBACK_DONE=0
+
+            rollback() {
+              if [ "$ROLLBACK_DONE" -eq 1 ]; then
+                return
+              fi
+              echo "Deployment failed. Starting rollback..."
+              ROLLBACK_DONE=1
+
+              cd "$APP_DIR"
+              git fetch origin main
+              git reset --hard "$PREV_COMMIT"
+
+              cd "$APP_DIR/backend"
+              npm ci
+              npm run build
+              pm2 restart collab-backend || pm2 start dist/server.js --name collab-backend
+              pm2 save
+
+              if [ -d "$FRONTEND_BACKUP" ]; then
+                sudo rm -rf "${FRONTEND_ROOT:?}"/*
+                sudo cp -r "$FRONTEND_BACKUP"/. "$FRONTEND_ROOT"/
+                sudo nginx -t
+                sudo systemctl reload nginx
+              fi
+
+              curl -fsS "$HEALTHCHECK_URL" >/dev/null
+              echo "Rollback completed."
+            }
+
+            trap rollback ERR
+
+            git fetch origin main
+            git checkout main
+            git reset --hard origin/main
+
+            cd "$APP_DIR/backend"
+            npm ci
+            npm run build
+            pm2 restart collab-backend || pm2 start dist/server.js --name collab-backend
+            pm2 save
+            curl -fsS "$HEALTHCHECK_URL" >/dev/null
+
+            cd "$APP_DIR/frontend"
+            npm ci
+            npm run build
+
+            mkdir -p "$FRONTEND_RELEASE"
+            cp -r dist/. "$FRONTEND_RELEASE"/
+
+            mkdir -p "$FRONTEND_BACKUP"
+            if [ -d "$FRONTEND_ROOT" ]; then
+              sudo cp -r "$FRONTEND_ROOT"/. "$FRONTEND_BACKUP"/ || true
+            fi
+
+            sudo rm -rf "${FRONTEND_ROOT:?}"/*
+            sudo cp -r "$FRONTEND_RELEASE"/. "$FRONTEND_ROOT"/
+            sudo nginx -t
+            sudo systemctl reload nginx
+
+            curl -fsS "$HEALTHCHECK_URL" >/dev/null
+
+            rm -rf "$FRONTEND_RELEASE" "$FRONTEND_BACKUP"
+            trap - ERR
+            echo "Deployment successful."
